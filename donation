@@ -1,0 +1,525 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, ScatterChart, Scatter } from 'recharts';
+import { Calendar, TrendingUp, Users, Heart, AlertTriangle, Download, Play, Settings } from 'lucide-react';
+import * as tf from 'tensorflow';
+
+const BloodDonationForecast = () => {
+  const [historicalData, setHistoricalData] = useState([]);
+  const [predictions, setPredictions] = useState([]);
+  const [model, setModel] = useState(null);
+  const [isTraining, setIsTraining] = useState(false);
+  const [selectedModel, setSelectedModel] = useState('neural');
+  const [forecastDays, setForecastDays] = useState(30);
+  const [modelMetrics, setModelMetrics] = useState({});
+  const [activeTab, setActiveTab] = useState('dashboard');
+
+  // Generate realistic blood donation data
+  const generateHistoricalData = () => {
+    const data = [];
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 365); // 1 year of data
+    
+    for (let i = 0; i < 365; i++) {
+      const date = new Date(startDate);
+      date.setDate(date.getDate() + i);
+      
+      const dayOfWeek = date.getDay();
+      const month = date.getMonth();
+      const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+      const isHoliday = (month === 11 && date.getDate() === 25) || 
+                       (month === 0 && date.getDate() === 1) ||
+                       (month === 6 && date.getDate() === 4);
+      
+      // Base donation patterns
+      let baseDonations = 50;
+      
+      // Seasonal patterns
+      if (month >= 2 && month <= 4) baseDonations += 15; // Spring campaigns
+      if (month >= 9 && month <= 10) baseDonations += 10; // Fall campaigns
+      if (month === 11 || month === 0) baseDonations -= 20; // Holiday drop
+      
+      // Weekly patterns
+      if (isWeekend) baseDonations -= 15;
+      if (dayOfWeek >= 1 && dayOfWeek <= 3) baseDonations += 10; // Peak midweek
+      
+      // Special events and campaigns
+      if (Math.random() < 0.05) baseDonations += 30; // Random campaigns
+      if (isHoliday) baseDonations -= 25;
+      
+      // Weather simulation (simplified)
+      const weatherFactor = Math.sin(i / 365 * 2 * Math.PI) * 10;
+      baseDonations += weatherFactor;
+      
+      // Add realistic noise
+      const noise = (Math.random() - 0.5) * 20;
+      const donations = Math.max(0, Math.round(baseDonations + noise));
+      
+      data.push({
+        date: date.toISOString().split('T')[0],
+        donations: donations,
+        dayOfWeek: dayOfWeek,
+        month: month,
+        isWeekend: isWeekend ? 1 : 0,
+        isHoliday: isHoliday ? 1 : 0,
+        temperature: 20 + Math.sin(i / 365 * 2 * Math.PI) * 15 + (Math.random() - 0.5) * 10,
+        precipitation: Math.random() < 0.3 ? Math.random() * 10 : 0
+      });
+    }
+    
+    return data;
+  };
+
+  // Initialize data
+  useEffect(() => {
+    const data = generateHistoricalData();
+    setHistoricalData(data);
+  }, []);
+
+  // Prepare features for ML model
+  const prepareFeatures = (data) => {
+    return data.map(item => [
+      item.dayOfWeek,
+      item.month,
+      item.isWeekend,
+      item.isHoliday,
+      item.temperature,
+      item.precipitation,
+      // Add moving averages
+      data.slice(Math.max(0, data.indexOf(item) - 7), data.indexOf(item))
+          .reduce((sum, d) => sum + d.donations, 0) / 7 || 0, // 7-day avg
+      data.slice(Math.max(0, data.indexOf(item) - 30), data.indexOf(item))
+          .reduce((sum, d) => sum + d.donations, 0) / 30 || 0  // 30-day avg
+    ]);
+  };
+
+  // Neural Network Model
+  const createNeuralModel = () => {
+    const model = tf.sequential({
+      layers: [
+        tf.layers.dense({ inputShape: [8], units: 64, activation: 'relu' }),
+        tf.layers.dropout({ rate: 0.3 }),
+        tf.layers.dense({ units: 32, activation: 'relu' }),
+        tf.layers.dropout({ rate: 0.2 }),
+        tf.layers.dense({ units: 16, activation: 'relu' }),
+        tf.layers.dense({ units: 1, activation: 'linear' })
+      ]
+    });
+    
+    model.compile({
+      optimizer: tf.train.adam(0.001),
+      loss: 'meanSquaredError',
+      metrics: ['meanAbsoluteError']
+    });
+    
+    return model;
+  };
+
+  // Simple Linear Regression
+  const linearRegression = (X, y) => {
+    const n = X.length;
+    const sumX = X.reduce((sum, val) => sum + val[0], 0);
+    const sumY = y.reduce((sum, val) => sum + val, 0);
+    const sumXY = X.reduce((sum, val, i) => sum + val[0] * y[i], 0);
+    const sumXX = X.reduce((sum, val) => sum + val[0] * val[0], 0);
+    
+    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    const intercept = (sumY - slope * sumX) / n;
+    
+    return { slope, intercept };
+  };
+
+  // Train the selected model
+  const trainModel = async () => {
+    if (historicalData.length === 0) return;
+    
+    setIsTraining(true);
+    
+    try {
+      const features = prepareFeatures(historicalData);
+      const targets = historicalData.map(item => item.donations);
+      
+      if (selectedModel === 'neural') {
+        const model = createNeuralModel();
+        
+        const xs = tf.tensor2d(features);
+        const ys = tf.tensor2d(targets, [targets.length, 1]);
+        
+        const history = await model.fit(xs, ys, {
+          epochs: 100,
+          batchSize: 32,
+          validationSplit: 0.2,
+          verbose: 0,
+          callbacks: {
+            onEpochEnd: (epoch, logs) => {
+              if (epoch % 20 === 0) {
+                console.log(`Epoch ${epoch}: loss = ${logs.loss.toFixed(4)}`);
+              }
+            }
+          }
+        });
+        
+        setModel(model);
+        setModelMetrics({
+          finalLoss: history.history.loss[history.history.loss.length - 1],
+          finalValLoss: history.history.val_loss[history.history.val_loss.length - 1],
+          modelType: 'Neural Network'
+        });
+        
+        xs.dispose();
+        ys.dispose();
+      } else {
+        // Simple moving average model
+        const windowSize = 7;
+        const predictions = [];
+        
+        for (let i = windowSize; i < targets.length; i++) {
+          const avg = targets.slice(i - windowSize, i).reduce((sum, val) => sum + val, 0) / windowSize;
+          predictions.push(avg);
+        }
+        
+        const mse = predictions.reduce((sum, pred, i) => 
+          sum + Math.pow(pred - targets[i + windowSize], 2), 0) / predictions.length;
+        
+        setModelMetrics({
+          finalLoss: mse,
+          modelType: 'Moving Average'
+        });
+      }
+      
+      generatePredictions();
+    } catch (error) {
+      console.error('Training error:', error);
+    }
+    
+    setIsTraining(false);
+  };
+
+  // Generate predictions
+  const generatePredictions = async () => {
+    if (!historicalData.length) return;
+    
+    const lastDate = new Date(historicalData[historicalData.length - 1].date);
+    const predictions = [];
+    
+    for (let i = 1; i <= forecastDays; i++) {
+      const futureDate = new Date(lastDate);
+      futureDate.setDate(futureDate.getDate() + i);
+      
+      const dayOfWeek = futureDate.getDay();
+      const month = futureDate.getMonth();
+      const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+      const isHoliday = (month === 11 && futureDate.getDate() === 25) || 
+                       (month === 0 && futureDate.getDate() === 1);
+      
+      let prediction;
+      
+      if (selectedModel === 'neural' && model) {
+        const features = tf.tensor2d([[
+          dayOfWeek,
+          month,
+          isWeekend ? 1 : 0,
+          isHoliday ? 1 : 0,
+          20 + Math.sin((historicalData.length + i) / 365 * 2 * Math.PI) * 15,
+          Math.random() < 0.3 ? Math.random() * 5 : 0,
+          historicalData.slice(-7).reduce((sum, d) => sum + d.donations, 0) / 7,
+          historicalData.slice(-30).reduce((sum, d) => sum + d.donations, 0) / 30
+        ]]);
+        
+        const pred = model.predict(features);
+        prediction = (await pred.data())[0];
+        
+        features.dispose();
+        pred.dispose();
+      } else {
+        // Moving average fallback
+        const recentDonations = historicalData.slice(-7).map(d => d.donations);
+        prediction = recentDonations.reduce((sum, val) => sum + val, 0) / recentDonations.length;
+        
+        // Apply day-of-week and seasonal adjustments
+        if (isWeekend) prediction *= 0.7;
+        if (isHoliday) prediction *= 0.5;
+        if (month >= 2 && month <= 4) prediction *= 1.2;
+      }
+      
+      predictions.push({
+        date: futureDate.toISOString().split('T')[0],
+        predicted: Math.max(0, Math.round(prediction)),
+        confidence: Math.random() * 0.3 + 0.7 // Simulate confidence
+      });
+    }
+    
+    setPredictions(predictions);
+  };
+
+  // Calculate summary statistics
+  const summaryStats = useMemo(() => {
+    if (!historicalData.length) return {};
+    
+    const donations = historicalData.map(d => d.donations);
+    const total = donations.reduce((sum, val) => sum + val, 0);
+    const avg = total / donations.length;
+    const max = Math.max(...donations);
+    const min = Math.min(...donations);
+    
+    const predictedTotal = predictions.reduce((sum, p) => sum + p.predicted, 0);
+    const trend = predictions.length > 0 ? 
+      (predictedTotal / predictions.length - avg) / avg * 100 : 0;
+    
+    return { total, avg, max, min, trend };
+  }, [historicalData, predictions]);
+
+  // Combine historical and prediction data for charts
+  const chartData = useMemo(() => {
+    const historical = historicalData.slice(-90).map(d => ({
+      date: d.date,
+      actual: d.donations,
+      type: 'historical'
+    }));
+    
+    const predicted = predictions.map(p => ({
+      date: p.date,
+      predicted: p.predicted,
+      confidence: p.confidence,
+      type: 'prediction'
+    }));
+    
+    return [...historical, ...predicted];
+  }, [historicalData, predictions]);
+
+  const renderDashboard = () => (
+    <div className="space-y-6">
+      {/* Key Metrics */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-gradient-to-r from-red-500 to-red-600 text-white p-6 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-red-100 text-sm">Total Donations (Year)</p>
+              <p className="text-2xl font-bold">{summaryStats.total?.toLocaleString()}</p>
+            </div>
+            <Heart className="h-8 w-8 text-red-200" />
+          </div>
+        </div>
+        
+        <div className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-6 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-blue-100 text-sm">Daily Average</p>
+              <p className="text-2xl font-bold">{Math.round(summaryStats.avg || 0)}</p>
+            </div>
+            <Users className="h-8 w-8 text-blue-200" />
+          </div>
+        </div>
+        
+        <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-6 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-green-100 text-sm">Trend Forecast</p>
+              <p className="text-2xl font-bold">{summaryStats.trend > 0 ? '+' : ''}{summaryStats.trend?.toFixed(1)}%</p>
+            </div>
+            <TrendingUp className="h-8 w-8 text-green-200" />
+          </div>
+        </div>
+        
+        <div className="bg-gradient-to-r from-orange-500 to-orange-600 text-white p-6 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-orange-100 text-sm">Alert Level</p>
+              <p className="text-2xl font-bold">{summaryStats.trend < -10 ? 'HIGH' : summaryStats.trend < 0 ? 'MEDIUM' : 'LOW'}</p>
+            </div>
+            <AlertTriangle className="h-8 w-8 text-orange-200" />
+          </div>
+        </div>
+      </div>
+
+      {/* Main Forecast Chart */}
+      <div className="bg-white p-6 rounded-lg shadow-lg">
+        <h3 className="text-xl font-semibold mb-4">Blood Donation Forecast</h3>
+        <ResponsiveContainer width="100%" height={400}>
+          <LineChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis 
+              dataKey="date" 
+              tickFormatter={(date) => new Date(date).toLocaleDateString()}
+            />
+            <YAxis />
+            <Tooltip 
+              labelFormatter={(date) => new Date(date).toLocaleDateString()}
+              formatter={(value, name) => [value, name === 'actual' ? 'Actual Donations' : 'Predicted Donations']}
+            />
+            <Legend />
+            <Line 
+              type="monotone" 
+              dataKey="actual" 
+              stroke="#3b82f6" 
+              strokeWidth={2}
+              name="Historical Data"
+              connectNulls={false}
+            />
+            <Line 
+              type="monotone" 
+              dataKey="predicted" 
+              stroke="#ef4444" 
+              strokeWidth={2}
+              strokeDasharray="5 5"
+              name="Predictions"
+              connectNulls={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Weekly Pattern Analysis */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white p-6 rounded-lg shadow-lg">
+          <h3 className="text-xl font-semibold mb-4">Weekly Donation Patterns</h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={[
+              { day: 'Mon', donations: historicalData.filter(d => new Date(d.date).getDay() === 1).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 1).length || 0 },
+              { day: 'Tue', donations: historicalData.filter(d => new Date(d.date).getDay() === 2).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 2).length || 0 },
+              { day: 'Wed', donations: historicalData.filter(d => new Date(d.date).getDay() === 3).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 3).length || 0 },
+              { day: 'Thu', donations: historicalData.filter(d => new Date(d.date).getDay() === 4).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 4).length || 0 },
+              { day: 'Fri', donations: historicalData.filter(d => new Date(d.date).getDay() === 5).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 5).length || 0 },
+              { day: 'Sat', donations: historicalData.filter(d => new Date(d.date).getDay() === 6).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 6).length || 0 },
+              { day: 'Sun', donations: historicalData.filter(d => new Date(d.date).getDay() === 0).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 0).length || 0 }
+            ]}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="day" />
+              <YAxis />
+              <Tooltip formatter={(value) => [Math.round(value), 'Avg Donations']} />
+              <Bar dataKey="donations" fill="#3b82f6" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="bg-white p-6 rounded-lg shadow-lg">
+          <h3 className="text-xl font-semibold mb-4">Model Performance</h3>
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Model Type:</span>
+              <span className="font-semibold">{modelMetrics.modelType || 'Not Trained'}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Training Loss:</span>
+              <span className="font-semibold">{modelMetrics.finalLoss ? modelMetrics.finalLoss.toFixed(4) : 'N/A'}</span>
+            </div>
+            {modelMetrics.finalValLoss && (
+              <div className="flex justify-between items-center">
+                <span className="text-gray-600">Validation Loss:</span>
+                <span className="font-semibold">{modelMetrics.finalValLoss.toFixed(4)}</span>
+              </div>
+            )}
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Predictions:</span>
+              <span className="font-semibold">{predictions.length} days</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderSettings = () => (
+    <div className="bg-white p-6 rounded-lg shadow-lg">
+      <h3 className="text-xl font-semibold mb-6">Model Configuration</h3>
+      
+      <div className="space-y-6">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Model Type
+          </label>
+          <select 
+            value={selectedModel} 
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option value="neural">Neural Network</option>
+            <option value="moving_average">Moving Average</option>
+          </select>
+        </div>
+        
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Forecast Period (days): {forecastDays}
+          </label>
+          <input
+            type="range"
+            min="7"
+            max="90"
+            value={forecastDays}
+            onChange={(e) => setForecastDays(parseInt(e.target.value))}
+            className="w-full"
+          />
+        </div>
+        
+        <div className="flex gap-4">
+          <button
+            onClick={trainModel}
+            disabled={isTraining}
+            className="flex items-center gap-2 bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Play className="h-4 w-4" />
+            {isTraining ? 'Training...' : 'Train Model'}
+          </button>
+          
+          <button
+            onClick={generatePredictions}
+            disabled={isTraining}
+            className="flex items-center gap-2 bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <TrendingUp className="h-4 w-4" />
+            Generate Forecast
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-6">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">Blood Donation Forecast System</h1>
+          <p className="text-gray-600">AI-powered predictions for healthcare resource planning</p>
+        </div>
+
+        {/* Navigation */}
+        <div className="flex space-x-1 mb-6">
+          <button
+            onClick={() => setActiveTab('dashboard')}
+            className={`px-4 py-2 rounded-lg font-medium ${
+              activeTab === 'dashboard' 
+                ? 'bg-blue-600 text-white' 
+                : 'bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <Calendar className="h-4 w-4 inline mr-2" />
+            Dashboard
+          </button>
+          <button
+            onClick={() => setActiveTab('settings')}
+            className={`px-4 py-2 rounded-lg font-medium ${
+              activeTab === 'settings' 
+                ? 'bg-blue-600 text-white' 
+                : 'bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <Settings className="h-4 w-4 inline mr-2" />
+            Settings
+          </button>
+        </div>
+
+        {/* Content */}
+        {activeTab === 'dashboard' && renderDashboard()}
+        {activeTab === 'settings' && renderSettings()}
+        
+        {/* Footer */}
+        <div className="mt-8 text-center text-sm text-gray-500">
+          <p>Blood Donation Forecast System - Helping healthcare providers optimize donation drives and inventory management</p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default BloodDonationForecast;

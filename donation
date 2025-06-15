@@ -1,525 +1,473 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, ScatterChart, Scatter } from 'recharts';
-import { Calendar, TrendingUp, Users, Heart, AlertTriangle, Download, Play, Settings } from 'lucide-react';
-import * as tf from 'tensorflow';
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.svm import SVR
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
-const BloodDonationForecast = () => {
-  const [historicalData, setHistoricalData] = useState([]);
-  const [predictions, setPredictions] = useState([]);
-  const [model, setModel] = useState(null);
-  const [isTraining, setIsTraining] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('neural');
-  const [forecastDays, setForecastDays] = useState(30);
-  const [modelMetrics, setModelMetrics] = useState({});
-  const [activeTab, setActiveTab] = useState('dashboard');
+# Set random seed for reproducibility
+np.random.seed(42)
 
-  // Generate realistic blood donation data
-  const generateHistoricalData = () => {
-    const data = [];
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - 365); // 1 year of data
-    
-    for (let i = 0; i < 365; i++) {
-      const date = new Date(startDate);
-      date.setDate(date.getDate() + i);
-      
-      const dayOfWeek = date.getDay();
-      const month = date.getMonth();
-      const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-      const isHoliday = (month === 11 && date.getDate() === 25) || 
-                       (month === 0 && date.getDate() === 1) ||
-                       (month === 6 && date.getDate() === 4);
-      
-      // Base donation patterns
-      let baseDonations = 50;
-      
-      // Seasonal patterns
-      if (month >= 2 && month <= 4) baseDonations += 15; // Spring campaigns
-      if (month >= 9 && month <= 10) baseDonations += 10; // Fall campaigns
-      if (month === 11 || month === 0) baseDonations -= 20; // Holiday drop
-      
-      // Weekly patterns
-      if (isWeekend) baseDonations -= 15;
-      if (dayOfWeek >= 1 && dayOfWeek <= 3) baseDonations += 10; // Peak midweek
-      
-      // Special events and campaigns
-      if (Math.random() < 0.05) baseDonations += 30; // Random campaigns
-      if (isHoliday) baseDonations -= 25;
-      
-      // Weather simulation (simplified)
-      const weatherFactor = Math.sin(i / 365 * 2 * Math.PI) * 10;
-      baseDonations += weatherFactor;
-      
-      // Add realistic noise
-      const noise = (Math.random() - 0.5) * 20;
-      const donations = Math.max(0, Math.round(baseDonations + noise));
-      
-      data.push({
-        date: date.toISOString().split('T')[0],
-        donations: donations,
-        dayOfWeek: dayOfWeek,
-        month: month,
-        isWeekend: isWeekend ? 1 : 0,
-        isHoliday: isHoliday ? 1 : 0,
-        temperature: 20 + Math.sin(i / 365 * 2 * Math.PI) * 15 + (Math.random() - 0.5) * 10,
-        precipitation: Math.random() < 0.3 ? Math.random() * 10 : 0
-      });
-    }
-    
-    return data;
-  };
-
-  // Initialize data
-  useEffect(() => {
-    const data = generateHistoricalData();
-    setHistoricalData(data);
-  }, []);
-
-  // Prepare features for ML model
-  const prepareFeatures = (data) => {
-    return data.map(item => [
-      item.dayOfWeek,
-      item.month,
-      item.isWeekend,
-      item.isHoliday,
-      item.temperature,
-      item.precipitation,
-      // Add moving averages
-      data.slice(Math.max(0, data.indexOf(item) - 7), data.indexOf(item))
-          .reduce((sum, d) => sum + d.donations, 0) / 7 || 0, // 7-day avg
-      data.slice(Math.max(0, data.indexOf(item) - 30), data.indexOf(item))
-          .reduce((sum, d) => sum + d.donations, 0) / 30 || 0  // 30-day avg
-    ]);
-  };
-
-  // Neural Network Model
-  const createNeuralModel = () => {
-    const model = tf.sequential({
-      layers: [
-        tf.layers.dense({ inputShape: [8], units: 64, activation: 'relu' }),
-        tf.layers.dropout({ rate: 0.3 }),
-        tf.layers.dense({ units: 32, activation: 'relu' }),
-        tf.layers.dropout({ rate: 0.2 }),
-        tf.layers.dense({ units: 16, activation: 'relu' }),
-        tf.layers.dense({ units: 1, activation: 'linear' })
-      ]
-    });
-    
-    model.compile({
-      optimizer: tf.train.adam(0.001),
-      loss: 'meanSquaredError',
-      metrics: ['meanAbsoluteError']
-    });
-    
-    return model;
-  };
-
-  // Simple Linear Regression
-  const linearRegression = (X, y) => {
-    const n = X.length;
-    const sumX = X.reduce((sum, val) => sum + val[0], 0);
-    const sumY = y.reduce((sum, val) => sum + val, 0);
-    const sumXY = X.reduce((sum, val, i) => sum + val[0] * y[i], 0);
-    const sumXX = X.reduce((sum, val) => sum + val[0] * val[0], 0);
-    
-    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
-    const intercept = (sumY - slope * sumX) / n;
-    
-    return { slope, intercept };
-  };
-
-  // Train the selected model
-  const trainModel = async () => {
-    if (historicalData.length === 0) return;
-    
-    setIsTraining(true);
-    
-    try {
-      const features = prepareFeatures(historicalData);
-      const targets = historicalData.map(item => item.donations);
-      
-      if (selectedModel === 'neural') {
-        const model = createNeuralModel();
+class BloodDonationForecaster:
+    def __init__(self):
+        self.scaler = StandardScaler()
+        self.model = None
+        self.feature_names = None
         
-        const xs = tf.tensor2d(features);
-        const ys = tf.tensor2d(targets, [targets.length, 1]);
+    def generate_blood_donation_data(self, n_samples=2000):
+        """Generate realistic blood donation data"""
         
-        const history = await model.fit(xs, ys, {
-          epochs: 100,
-          batchSize: 32,
-          validationSplit: 0.2,
-          verbose: 0,
-          callbacks: {
-            onEpochEnd: (epoch, logs) => {
-              if (epoch % 20 === 0) {
-                console.log(`Epoch ${epoch}: loss = ${logs.loss.toFixed(4)}`);
-              }
-            }
-          }
-        });
+        # Generate date range for the past 3 years
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=1095)  # 3 years
         
-        setModel(model);
-        setModelMetrics({
-          finalLoss: history.history.loss[history.history.loss.length - 1],
-          finalValLoss: history.history.val_loss[history.history.val_loss.length - 1],
-          modelType: 'Neural Network'
-        });
+        # Blood types and their frequencies (realistic distribution)
+        blood_types = ['O+', 'A+', 'B+', 'AB+', 'O-', 'A-', 'B-', 'AB-']
+        blood_type_freq = [0.374, 0.357, 0.085, 0.034, 0.066, 0.063, 0.015, 0.006]
         
-        xs.dispose();
-        ys.dispose();
-      } else {
-        // Simple moving average model
-        const windowSize = 7;
-        const predictions = [];
+        # Cities with different population densities
+        cities = ['Mumbai', 'Delhi', 'Bangalore', 'Chennai', 'Kolkata', 'Hyderabad', 'Pune', 'Ahmedabad']
+        city_population = [12.5, 11.0, 8.4, 7.0, 4.5, 6.9, 3.1, 5.6]  # in millions
         
-        for (let i = windowSize; i < targets.length; i++) {
-          const avg = targets.slice(i - windowSize, i).reduce((sum, val) => sum + val, 0) / windowSize;
-          predictions.push(avg);
+        # Generate donation centers
+        donation_centers = ['City Hospital', 'Red Cross Center', 'Community Center', 'Mobile Unit', 'University Campus']
+        
+        data = []
+        
+        for i in range(n_samples):
+            # Generate random date
+            random_days = np.random.randint(0, 1095)
+            donation_date = start_date + timedelta(days=random_days)
+            
+            # Extract time features
+            day_of_week = donation_date.weekday()  # 0=Monday, 6=Sunday
+            month = donation_date.month
+            is_weekend = 1 if day_of_week >= 5 else 0
+            
+            # Select city and blood type
+            city = np.random.choice(cities, p=np.array(city_population)/sum(city_population))
+            blood_type = np.random.choice(blood_types, p=blood_type_freq)
+            center = np.random.choice(donation_centers)
+            
+            # Generate donor demographics
+            age = np.random.normal(35, 12)  # Average age around 35
+            age = max(18, min(65, age))  # Clamp between 18-65
+            
+            gender = np.random.choice(['Male', 'Female'], p=[0.55, 0.45])
+            
+            # Generate health and behavioral factors
+            hemoglobin_level = np.random.normal(13.5, 1.5)  # Normal range
+            previous_donations = np.random.poisson(3)  # Average 3 previous donations
+            
+            # Weather factors (simplified)
+            temperature = np.random.normal(25, 8)  # Celsius
+            is_holiday = np.random.choice([0, 1], p=[0.9, 0.1])
+            
+            # Campaign factors
+            social_media_campaign = np.random.choice([0, 1], p=[0.7, 0.3])
+            emergency_appeal = np.random.choice([0, 1], p=[0.85, 0.15])
+            
+            # Calculate donation likelihood and volume
+            base_donations = 50  # Base daily donations
+            
+            # City factor
+            city_factor = city_population[cities.index(city)] / 10
+            
+            # Time factors
+            weekend_factor = 1.3 if is_weekend else 1.0
+            holiday_factor = 0.7 if is_holiday else 1.0
+            
+            # Seasonal factors
+            if month in [12, 1, 2]:  # Winter - more donations due to holidays
+                seasonal_factor = 1.2
+            elif month in [6, 7, 8]:  # Summer - fewer donations
+                seasonal_factor = 0.8
+            else:
+                seasonal_factor = 1.0
+            
+            # Campaign factors
+            campaign_factor = 1.0
+            if social_media_campaign:
+                campaign_factor *= 1.4
+            if emergency_appeal:
+                campaign_factor *= 1.8
+            
+            # Blood type rarity factor (rarer types get more focused campaigns)
+            rarity_factor = {'O+': 1.0, 'A+': 1.0, 'B+': 1.1, 'AB+': 1.2,
+                           'O-': 1.5, 'A-': 1.3, 'B-': 1.4, 'AB-': 1.6}[blood_type]
+            
+            # Weather factor
+            weather_factor = 1.0
+            if temperature < 5 or temperature > 40:  # Extreme weather
+                weather_factor = 0.6
+            
+            # Calculate predicted donations
+            predicted_donations = (base_donations * city_factor * weekend_factor * 
+                                 holiday_factor * seasonal_factor * campaign_factor * 
+                                 rarity_factor * weather_factor)
+            
+            # Add random noise
+            predicted_donations += np.random.normal(0, 10)
+            predicted_donations = max(0, predicted_donations)  # Ensure non-negative
+            
+            data.append({
+                'date': donation_date.strftime('%Y-%m-%d'),
+                'city': city,
+                'donation_center': center,
+                'blood_type': blood_type,
+                'day_of_week': day_of_week,
+                'month': month,
+                'is_weekend': is_weekend,
+                'is_holiday': is_holiday,
+                'temperature': round(temperature, 1),
+                'donor_age_avg': round(age, 1),
+                'donor_gender_male_ratio': 1 if gender == 'Male' else 0,
+                'hemoglobin_avg': round(hemoglobin_level, 1),
+                'previous_donations_avg': previous_donations,
+                'social_media_campaign': social_media_campaign,
+                'emergency_appeal': emergency_appeal,
+                'city_population': city_population[cities.index(city)],
+                'donations': round(predicted_donations, 0)
+            })
+        
+        return pd.DataFrame(data)
+    
+    def preprocess_data(self, df):
+        """Preprocess the blood donation data"""
+        df = df.copy()
+        
+        # Convert date to datetime
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Create additional time features
+        df['year'] = df['date'].dt.year
+        df['quarter'] = df['date'].dt.quarter
+        df['day_of_year'] = df['date'].dt.dayofyear
+        
+        # Encode categorical variables
+        le_city = LabelEncoder()
+        le_center = LabelEncoder()
+        le_blood_type = LabelEncoder()
+        
+        df['city_encoded'] = le_city.fit_transform(df['city'])
+        df['center_encoded'] = le_center.fit_transform(df['donation_center'])
+        df['blood_type_encoded'] = le_blood_type.fit_transform(df['blood_type'])
+        
+        # Create seasonal features
+        df['sin_month'] = np.sin(2 * np.pi * df['month'] / 12)
+        df['cos_month'] = np.cos(2 * np.pi * df['month'] / 12)
+        df['sin_day'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
+        df['cos_day'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
+        
+        # Create interaction features
+        df['campaign_interaction'] = df['social_media_campaign'] * df['emergency_appeal']
+        df['weekend_holiday'] = df['is_weekend'] * df['is_holiday']
+        df['temp_squared'] = df['temperature'] ** 2
+        
+        return df, le_city, le_center, le_blood_type
+    
+    def prepare_features(self, df):
+        """Prepare features for modeling"""
+        feature_columns = [
+            'city_encoded', 'center_encoded', 'blood_type_encoded',
+            'day_of_week', 'month', 'year', 'quarter', 'day_of_year',
+            'is_weekend', 'is_holiday', 'temperature', 'temp_squared',
+            'donor_age_avg', 'donor_gender_male_ratio', 'hemoglobin_avg',
+            'previous_donations_avg', 'social_media_campaign', 'emergency_appeal',
+            'city_population', 'sin_month', 'cos_month', 'sin_day', 'cos_day',
+            'campaign_interaction', 'weekend_holiday'
+        ]
+        
+        X = df[feature_columns]
+        y = df['donations']
+        
+        self.feature_names = feature_columns
+        return X, y
+    
+    def train_model(self, X, y):
+        """Train multiple models and select the best one"""
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+        
+        # Define models
+        models = {
+            'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
+            'Gradient Boosting': GradientBoostingRegressor(random_state=42),
+            'Ridge Regression': Ridge(alpha=1.0),
+            'SVR': SVR(kernel='rbf', C=100, gamma=0.1)
         }
         
-        const mse = predictions.reduce((sum, pred, i) => 
-          sum + Math.pow(pred - targets[i + windowSize], 2), 0) / predictions.length;
+        best_score = -np.inf
+        best_model = None
+        best_name = None
         
-        setModelMetrics({
-          finalLoss: mse,
-          modelType: 'Moving Average'
-        });
-      }
-      
-      generatePredictions();
-    } catch (error) {
-      console.error('Training error:', error);
-    }
+        print("Model Comparison:")
+        print("-" * 50)
+        
+        for name, model in models.items():
+            # Cross-validation
+            cv_scores = cross_val_score(model, X_scaled, y, cv=5, scoring='r2')
+            mean_score = cv_scores.mean()
+            std_score = cv_scores.std()
+            
+            print(f"{name}: R² = {mean_score:.4f} (±{std_score:.4f})")
+            
+            if mean_score > best_score:
+                best_score = mean_score
+                best_model = model
+                best_name = name
+        
+        print(f"\nBest Model: {best_name}")
+        print("-" * 50)
+        
+        # Train the best model
+        self.model = best_model
+        self.model.fit(X_scaled, y)
+        
+        return best_name, best_score
     
-    setIsTraining(false);
-  };
-
-  // Generate predictions
-  const generatePredictions = async () => {
-    if (!historicalData.length) return;
+    def evaluate_model(self, X_test, y_test):
+        """Evaluate the trained model"""
+        X_test_scaled = self.scaler.transform(X_test)
+        y_pred = self.model.predict(X_test_scaled)
+        
+        mae = mean_absolute_error(y_test, y_pred)
+        mse = mean_squared_error(y_test, y_pred)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(y_test, y_pred)
+        
+        print(f"Test Set Performance:")
+        print(f"MAE: {mae:.2f} donations")
+        print(f"RMSE: {rmse:.2f} donations")
+        print(f"R² Score: {r2:.4f}")
+        
+        return {'mae': mae, 'rmse': rmse, 'r2': r2, 'predictions': y_pred}
     
-    const lastDate = new Date(historicalData[historicalData.length - 1].date);
-    const predictions = [];
+    def forecast_future_donations(self, df, days_ahead=30):
+        """Forecast donations for future dates"""
+        # Get the last date in the dataset
+        last_date = pd.to_datetime(df['date']).max()
+        
+        # Generate future dates
+        future_dates = [last_date + timedelta(days=i) for i in range(1, days_ahead + 1)]
+        
+        # Create future data based on recent patterns
+        recent_data = df.tail(100)  # Use last 100 records as reference
+        
+        future_data = []
+        for date in future_dates:
+            # Sample from recent data to maintain realistic patterns
+            sample_row = recent_data.sample(1).iloc[0]
+            
+            future_row = sample_row.copy()
+            future_row['date'] = date.strftime('%Y-%m-%d')
+            future_row['day_of_week'] = date.weekday()
+            future_row['month'] = date.month
+            future_row['year'] = date.year
+            future_row['quarter'] = (date.month - 1) // 3 + 1
+            future_row['day_of_year'] = date.timetuple().tm_yday
+            future_row['is_weekend'] = 1 if date.weekday() >= 5 else 0
+            
+            future_data.append(future_row)
+        
+        future_df = pd.DataFrame(future_data)
+        
+        # Preprocess future data
+        future_df, _, _, _ = self.preprocess_data(future_df)
+        X_future, _ = self.prepare_features(future_df)
+        
+        # Make predictions
+        X_future_scaled = self.scaler.transform(X_future)
+        future_predictions = self.model.predict(X_future_scaled)
+        
+        # Create forecast dataframe
+        forecast_df = pd.DataFrame({
+            'date': future_dates,
+            'predicted_donations': future_predictions
+        })
+        
+        return forecast_df
     
-    for (let i = 1; i <= forecastDays; i++) {
-      const futureDate = new Date(lastDate);
-      futureDate.setDate(futureDate.getDate() + i);
-      
-      const dayOfWeek = futureDate.getDay();
-      const month = futureDate.getMonth();
-      const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-      const isHoliday = (month === 11 && futureDate.getDate() === 25) || 
-                       (month === 0 && futureDate.getDate() === 1);
-      
-      let prediction;
-      
-      if (selectedModel === 'neural' && model) {
-        const features = tf.tensor2d([[
-          dayOfWeek,
-          month,
-          isWeekend ? 1 : 0,
-          isHoliday ? 1 : 0,
-          20 + Math.sin((historicalData.length + i) / 365 * 2 * Math.PI) * 15,
-          Math.random() < 0.3 ? Math.random() * 5 : 0,
-          historicalData.slice(-7).reduce((sum, d) => sum + d.donations, 0) / 7,
-          historicalData.slice(-30).reduce((sum, d) => sum + d.donations, 0) / 30
-        ]]);
+    def plot_results(self, df, y_test, y_pred, forecast_df=None):
+        """Plot various analysis results"""
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
         
-        const pred = model.predict(features);
-        prediction = (await pred.data())[0];
+        # 1. Actual vs Predicted
+        axes[0, 0].scatter(y_test, y_pred, alpha=0.6, color='blue')
+        axes[0, 0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+        axes[0, 0].set_xlabel('Actual Donations')
+        axes[0, 0].set_ylabel('Predicted Donations')
+        axes[0, 0].set_title('Actual vs Predicted Donations')
         
-        features.dispose();
-        pred.dispose();
-      } else {
-        // Moving average fallback
-        const recentDonations = historicalData.slice(-7).map(d => d.donations);
-        prediction = recentDonations.reduce((sum, val) => sum + val, 0) / recentDonations.length;
+        # 2. Time series of donations
+        df_sorted = df.sort_values('date')
+        axes[0, 1].plot(pd.to_datetime(df_sorted['date']), df_sorted['donations'], alpha=0.7)
+        axes[0, 1].set_xlabel('Date')
+        axes[0, 1].set_ylabel('Donations')
+        axes[0, 1].set_title('Blood Donations Over Time')
+        axes[0, 1].tick_params(axis='x', rotation=45)
         
-        // Apply day-of-week and seasonal adjustments
-        if (isWeekend) prediction *= 0.7;
-        if (isHoliday) prediction *= 0.5;
-        if (month >= 2 && month <= 4) prediction *= 1.2;
-      }
-      
-      predictions.push({
-        date: futureDate.toISOString().split('T')[0],
-        predicted: Math.max(0, Math.round(prediction)),
-        confidence: Math.random() * 0.3 + 0.7 // Simulate confidence
-      });
-    }
+        # 3. Donations by blood type
+        blood_type_donations = df.groupby('blood_type')['donations'].mean().sort_values(ascending=False)
+        axes[0, 2].bar(blood_type_donations.index, blood_type_donations.values, color='red', alpha=0.7)
+        axes[0, 2].set_xlabel('Blood Type')
+        axes[0, 2].set_ylabel('Average Donations')
+        axes[0, 2].set_title('Average Donations by Blood Type')
+        
+        # 4. Seasonal patterns
+        monthly_donations = df.groupby('month')['donations'].mean()
+        axes[1, 0].plot(monthly_donations.index, monthly_donations.values, marker='o', color='green')
+        axes[1, 0].set_xlabel('Month')
+        axes[1, 0].set_ylabel('Average Donations')
+        axes[1, 0].set_title('Seasonal Donation Patterns')
+        axes[1, 0].set_xticks(range(1, 13))
+        
+        # 5. Weekend vs Weekday donations
+        weekend_donations = df.groupby('is_weekend')['donations'].mean()
+        axes[1, 1].bar(['Weekday', 'Weekend'], weekend_donations.values, color=['blue', 'orange'])
+        axes[1, 1].set_ylabel('Average Donations')
+        axes[1, 1].set_title('Weekend vs Weekday Donations')
+        
+        # 6. Future forecast (if provided)
+        if forecast_df is not None:
+            axes[1, 2].plot(forecast_df['date'], forecast_df['predicted_donations'], 
+                           marker='o', color='purple', linewidth=2)
+            axes[1, 2].set_xlabel('Date')
+            axes[1, 2].set_ylabel('Predicted Donations')
+            axes[1, 2].set_title('Future Donation Forecast')
+            axes[1, 2].tick_params(axis='x', rotation=45)
+        else:
+            axes[1, 2].axis('off')
+        
+        plt.tight_layout()
+        plt.show()
     
-    setPredictions(predictions);
-  };
+    def feature_importance_analysis(self, X):
+        """Analyze feature importance"""
+        if hasattr(self.model, 'feature_importances_'):
+            importance = self.model.feature_importances_
+            feature_importance = pd.DataFrame({
+                'feature': self.feature_names,
+                'importance': importance
+            }).sort_values('importance', ascending=False)
+            
+            plt.figure(figsize=(12, 8))
+            top_features = feature_importance.head(15)
+            sns.barplot(data=top_features, x='importance', y='feature', palette='viridis')
+            plt.title('Top 15 Feature Importances for Blood Donation Prediction')
+            plt.xlabel('Importance')
+            plt.tight_layout()
+            plt.show()
+            
+            return feature_importance
+        else:
+            print("Feature importance not available for this model type.")
+            return None
 
-  // Calculate summary statistics
-  const summaryStats = useMemo(() => {
-    if (!historicalData.length) return {};
+def main():
+    """Main function to run the Blood Donation Forecasting"""
+    print("🩸 Blood Donation Forecasting System")
+    print("=" * 50)
     
-    const donations = historicalData.map(d => d.donations);
-    const total = donations.reduce((sum, val) => sum + val, 0);
-    const avg = total / donations.length;
-    const max = Math.max(...donations);
-    const min = Math.min(...donations);
+    # Initialize forecaster
+    forecaster = BloodDonationForecaster()
     
-    const predictedTotal = predictions.reduce((sum, p) => sum + p.predicted, 0);
-    const trend = predictions.length > 0 ? 
-      (predictedTotal / predictions.length - avg) / avg * 100 : 0;
+    # Generate sample data
+    print("\n1. Generating blood donation data...")
+    df = forecaster.generate_blood_donation_data(n_samples=2000)
+    print(f"Generated {len(df)} donation records")
     
-    return { total, avg, max, min, trend };
-  }, [historicalData, predictions]);
-
-  // Combine historical and prediction data for charts
-  const chartData = useMemo(() => {
-    const historical = historicalData.slice(-90).map(d => ({
-      date: d.date,
-      actual: d.donations,
-      type: 'historical'
-    }));
+    # Display sample data
+    print("\n2. Sample Data Preview:")
+    print("-" * 40)
+    print(df.head())
     
-    const predicted = predictions.map(p => ({
-      date: p.date,
-      predicted: p.predicted,
-      confidence: p.confidence,
-      type: 'prediction'
-    }));
+    # Basic statistics
+    print("\n3. Basic Statistics:")
+    print("-" * 40)
+    print(f"Total Donations: {df['donations'].sum():,.0f}")
+    print(f"Average Daily Donations: {df['donations'].mean():.2f}")
+    print(f"Date Range: {df['date'].min()} to {df['date'].max()}")
+    print(f"Cities Covered: {df['city'].nunique()}")
+    print(f"Blood Types: {df['blood_type'].nunique()}")
     
-    return [...historical, ...predicted];
-  }, [historicalData, predictions]);
+    # Preprocess data
+    print("\n4. Preprocessing data...")
+    df_processed, le_city, le_center, le_blood_type = forecaster.preprocess_data(df)
+    
+    # Prepare features
+    X, y = forecaster.prepare_features(df_processed)
+    print(f"Feature matrix shape: {X.shape}")
+    print(f"Target variable shape: {y.shape}")
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    print(f"Training set: {X_train.shape[0]} samples")
+    print(f"Test set: {X_test.shape[0]} samples")
+    
+    # Train model
+    print("\n5. Training models...")
+    best_model_name, best_score = forecaster.train_model(X_train, y_train)
+    
+    # Evaluate model
+    print("\n6. Model Evaluation:")
+    print("-" * 40)
+    results = forecaster.evaluate_model(X_test, y_test)
+    
+    # Feature importance analysis
+    print("\n7. Feature Importance Analysis:")
+    print("-" * 40)
+    importance_df = forecaster.feature_importance_analysis(X_train)
+    
+    if importance_df is not None:
+        print("\nTop 10 Most Important Features:")
+        print(importance_df.head(10)[['feature', 'importance']].to_string(index=False))
+    
+    # Future forecast
+    print("\n8. Future Donations Forecast:")
+    print("-" * 40)
+    forecast_df = forecaster.forecast_future_donations(df_processed, days_ahead=30)
+    print(f"Forecasted donations for next 30 days:")
+    print(f"Total: {forecast_df['predicted_donations'].sum():.0f}")
+    print(f"Daily Average: {forecast_df['predicted_donations'].mean():.2f}")
+    
+    # Plot results
+    print("\n9. Visualization:")
+    forecaster.plot_results(df_processed, y_test, results['predictions'], forecast_df)
+    
+    # Key insights
+    print("\n10. Key Insights:")
+    print("-" * 40)
+    
+    # Blood type analysis
+    blood_type_stats = df.groupby('blood_type')['donations'].agg(['mean', 'sum']).round(2)
+    print("Blood Type Analysis:")
+    print(blood_type_stats)
+    
+    # City analysis
+    city_stats = df.groupby('city')['donations'].agg(['mean', 'sum']).round(2)
+    print(f"\nTop 3 Cities by Total Donations:")
+    print(city_stats.sort_values('sum', ascending=False).head(3))
+    
+    # Campaign effectiveness
+    campaign_effect = df.groupby('social_media_campaign')['donations'].mean()
+    print(f"\nSocial Media Campaign Effect:")
+    print(f"Without Campaign: {campaign_effect[0]:.2f} donations")
+    print(f"With Campaign: {campaign_effect[1]:.2f} donations")
+    print(f"Improvement: {((campaign_effect[1] - campaign_effect[0]) / campaign_effect[0] * 100):.1f}%")
+    
+    print("\n✅ Blood Donation Forecasting Analysis Complete!")
+    print("=" * 50)
 
-  const renderDashboard = () => (
-    <div className="space-y-6">
-      {/* Key Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-gradient-to-r from-red-500 to-red-600 text-white p-6 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-red-100 text-sm">Total Donations (Year)</p>
-              <p className="text-2xl font-bold">{summaryStats.total?.toLocaleString()}</p>
-            </div>
-            <Heart className="h-8 w-8 text-red-200" />
-          </div>
-        </div>
-        
-        <div className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-6 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-blue-100 text-sm">Daily Average</p>
-              <p className="text-2xl font-bold">{Math.round(summaryStats.avg || 0)}</p>
-            </div>
-            <Users className="h-8 w-8 text-blue-200" />
-          </div>
-        </div>
-        
-        <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-6 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-green-100 text-sm">Trend Forecast</p>
-              <p className="text-2xl font-bold">{summaryStats.trend > 0 ? '+' : ''}{summaryStats.trend?.toFixed(1)}%</p>
-            </div>
-            <TrendingUp className="h-8 w-8 text-green-200" />
-          </div>
-        </div>
-        
-        <div className="bg-gradient-to-r from-orange-500 to-orange-600 text-white p-6 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-orange-100 text-sm">Alert Level</p>
-              <p className="text-2xl font-bold">{summaryStats.trend < -10 ? 'HIGH' : summaryStats.trend < 0 ? 'MEDIUM' : 'LOW'}</p>
-            </div>
-            <AlertTriangle className="h-8 w-8 text-orange-200" />
-          </div>
-        </div>
-      </div>
-
-      {/* Main Forecast Chart */}
-      <div className="bg-white p-6 rounded-lg shadow-lg">
-        <h3 className="text-xl font-semibold mb-4">Blood Donation Forecast</h3>
-        <ResponsiveContainer width="100%" height={400}>
-          <LineChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis 
-              dataKey="date" 
-              tickFormatter={(date) => new Date(date).toLocaleDateString()}
-            />
-            <YAxis />
-            <Tooltip 
-              labelFormatter={(date) => new Date(date).toLocaleDateString()}
-              formatter={(value, name) => [value, name === 'actual' ? 'Actual Donations' : 'Predicted Donations']}
-            />
-            <Legend />
-            <Line 
-              type="monotone" 
-              dataKey="actual" 
-              stroke="#3b82f6" 
-              strokeWidth={2}
-              name="Historical Data"
-              connectNulls={false}
-            />
-            <Line 
-              type="monotone" 
-              dataKey="predicted" 
-              stroke="#ef4444" 
-              strokeWidth={2}
-              strokeDasharray="5 5"
-              name="Predictions"
-              connectNulls={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Weekly Pattern Analysis */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white p-6 rounded-lg shadow-lg">
-          <h3 className="text-xl font-semibold mb-4">Weekly Donation Patterns</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[
-              { day: 'Mon', donations: historicalData.filter(d => new Date(d.date).getDay() === 1).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 1).length || 0 },
-              { day: 'Tue', donations: historicalData.filter(d => new Date(d.date).getDay() === 2).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 2).length || 0 },
-              { day: 'Wed', donations: historicalData.filter(d => new Date(d.date).getDay() === 3).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 3).length || 0 },
-              { day: 'Thu', donations: historicalData.filter(d => new Date(d.date).getDay() === 4).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 4).length || 0 },
-              { day: 'Fri', donations: historicalData.filter(d => new Date(d.date).getDay() === 5).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 5).length || 0 },
-              { day: 'Sat', donations: historicalData.filter(d => new Date(d.date).getDay() === 6).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 6).length || 0 },
-              { day: 'Sun', donations: historicalData.filter(d => new Date(d.date).getDay() === 0).reduce((sum, d) => sum + d.donations, 0) / historicalData.filter(d => new Date(d.date).getDay() === 0).length || 0 }
-            ]}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="day" />
-              <YAxis />
-              <Tooltip formatter={(value) => [Math.round(value), 'Avg Donations']} />
-              <Bar dataKey="donations" fill="#3b82f6" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-lg">
-          <h3 className="text-xl font-semibold mb-4">Model Performance</h3>
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <span className="text-gray-600">Model Type:</span>
-              <span className="font-semibold">{modelMetrics.modelType || 'Not Trained'}</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-gray-600">Training Loss:</span>
-              <span className="font-semibold">{modelMetrics.finalLoss ? modelMetrics.finalLoss.toFixed(4) : 'N/A'}</span>
-            </div>
-            {modelMetrics.finalValLoss && (
-              <div className="flex justify-between items-center">
-                <span className="text-gray-600">Validation Loss:</span>
-                <span className="font-semibold">{modelMetrics.finalValLoss.toFixed(4)}</span>
-              </div>
-            )}
-            <div className="flex justify-between items-center">
-              <span className="text-gray-600">Predictions:</span>
-              <span className="font-semibold">{predictions.length} days</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderSettings = () => (
-    <div className="bg-white p-6 rounded-lg shadow-lg">
-      <h3 className="text-xl font-semibold mb-6">Model Configuration</h3>
-      
-      <div className="space-y-6">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Model Type
-          </label>
-          <select 
-            value={selectedModel} 
-            onChange={(e) => setSelectedModel(e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-          >
-            <option value="neural">Neural Network</option>
-            <option value="moving_average">Moving Average</option>
-          </select>
-        </div>
-        
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Forecast Period (days): {forecastDays}
-          </label>
-          <input
-            type="range"
-            min="7"
-            max="90"
-            value={forecastDays}
-            onChange={(e) => setForecastDays(parseInt(e.target.value))}
-            className="w-full"
-          />
-        </div>
-        
-        <div className="flex gap-4">
-          <button
-            onClick={trainModel}
-            disabled={isTraining}
-            className="flex items-center gap-2 bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Play className="h-4 w-4" />
-            {isTraining ? 'Training...' : 'Train Model'}
-          </button>
-          
-          <button
-            onClick={generatePredictions}
-            disabled={isTraining}
-            className="flex items-center gap-2 bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <TrendingUp className="h-4 w-4" />
-            Generate Forecast
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Blood Donation Forecast System</h1>
-          <p className="text-gray-600">AI-powered predictions for healthcare resource planning</p>
-        </div>
-
-        {/* Navigation */}
-        <div className="flex space-x-1 mb-6">
-          <button
-            onClick={() => setActiveTab('dashboard')}
-            className={`px-4 py-2 rounded-lg font-medium ${
-              activeTab === 'dashboard' 
-                ? 'bg-blue-600 text-white' 
-                : 'bg-white text-gray-700 hover:bg-gray-50'
-            }`}
-          >
-            <Calendar className="h-4 w-4 inline mr-2" />
-            Dashboard
-          </button>
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`px-4 py-2 rounded-lg font-medium ${
-              activeTab === 'settings' 
-                ? 'bg-blue-600 text-white' 
-                : 'bg-white text-gray-700 hover:bg-gray-50'
-            }`}
-          >
-            <Settings className="h-4 w-4 inline mr-2" />
-            Settings
-          </button>
-        </div>
-
-        {/* Content */}
-        {activeTab === 'dashboard' && renderDashboard()}
-        {activeTab === 'settings' && renderSettings()}
-        
-        {/* Footer */}
-        <div className="mt-8 text-center text-sm text-gray-500">
-          <p>Blood Donation Forecast System - Helping healthcare providers optimize donation drives and inventory management</p>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-export default BloodDonationForecast;
+if __name__ == "__main__":
+    main()
